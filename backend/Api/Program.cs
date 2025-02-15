@@ -1,41 +1,80 @@
-var builder = WebApplication.CreateBuilder(args);
+using Api.DataAccess;
+using Api.Models;
+using Api.Services;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
+using Npgsql;
+using Serilog;
+using Serilog.Context;
+using Serilog.Events;
+using System.Data.Common;
+using System.Text.Json;
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+namespace Api;
 
-var app = builder.Build();
-
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+public class Program
 {
-    app.MapOpenApi();
-}
+	public static void Main(string[] args)
+	{
+		var builder = WebApplication.CreateSlimBuilder(args);
 
-app.UseHttpsRedirection();
+		builder.Configuration
+			.SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+			.AddJsonFile($"appsettings.json", false, true)
+			.AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", true, true);
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+		builder.Services.AddSerilog((_, configure) => configure
+			.ReadFrom.Configuration(builder.Configuration)
+		);
 
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+		builder.Services.AddControllers();
+		builder.Services.AddEndpointsApiExplorer();
+		builder.Services.AddSwaggerGen();
 
-app.Run();
+		builder.Services.AddScoped<NpgsqlConnection>(
+			provider => new NpgsqlConnection(builder.Configuration["ConnectionStrings:DefaultConnection"]));
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+		builder.Services.AddScoped<MessageRepository>();
+		builder.Services.AddSingleton<MessageRealtimeService>();
+
+		var app = builder.Build();
+
+		app.UseWebSockets();
+
+		app.UseSwagger();
+		app.UseSwaggerUI();
+		app.MapControllers();
+
+		using(var scope = app.Services.CreateScope())
+		{
+			var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+			using var conn = scope.ServiceProvider.GetRequiredService<NpgsqlConnection>();
+			using var cmd = conn.CreateCommand();
+			cmd.CommandText = $"""
+				CREATE TABLE IF NOT EXISTS {nameof(Message)}s (
+					{nameof(Message.Id)} SERIAL8 PRIMARY KEY,
+					{nameof(Message.Seq)} INT8 NOT NULL,
+					{nameof(Message.CreatedAt)} TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
+					{nameof(Message.Text)} VARCHAR(128) NOT NULL
+				);
+			""";
+
+			try
+			{
+				conn.Open();
+				cmd.ExecuteNonQuery();
+				logger.LogInformation("Database schema ensured.");
+			}
+			catch(Exception ex)
+			{
+				logger.LogCritical($"Failed to create database schema: '{ex.Message}'.");
+				throw;
+			}
+		}
+
+		app.Run();
+	}
 }
