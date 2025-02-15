@@ -1,5 +1,11 @@
 # tt_koshru
-## запуск на порту 4000
+## frontend endpoints
+- / - react fronend root path
+  - /writer
+  - /reader
+  - /history
+- /swagger - swagger root path
+## launch on port 4000
 ```
 docker compose up
 ```
